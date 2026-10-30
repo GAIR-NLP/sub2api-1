@@ -24,8 +24,9 @@ func NewAdminAPIKeyHandler(adminService service.AdminService) *AdminAPIKeyHandle
 
 // AdminUpdateAPIKeyGroupRequest represents the request to update an API key.
 type AdminUpdateAPIKeyGroupRequest struct {
-	GroupID             *int64 `json:"group_id"`               // nil=不修改, 0=解绑, >0=绑定到目标分组
-	ResetRateLimitUsage *bool  `json:"reset_rate_limit_usage"` // true=重置 5h/1d/7d 限速用量
+	GroupID             *int64  `json:"group_id"`               // nil=不修改, 0=解绑, >0=绑定到目标分组
+	ResetRateLimitUsage *bool   `json:"reset_rate_limit_usage"` // true=重置 5h/1d/7d 限速用量
+	Status              *string `json:"status"`                 // nil=不修改; "active"/"disabled"
 }
 
 // UpdateGroup handles updating an API key's admin-managed fields.
@@ -52,6 +53,15 @@ func (h *AdminAPIKeyHandler) UpdateGroup(c *gin.Context) {
 		}
 	}
 
+	var statusKey *service.APIKey
+	if req.Status != nil {
+		statusKey, err = h.adminService.AdminUpdateAPIKeyStatus(c.Request.Context(), keyID, *req.Status)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
+
 	result, err := h.adminService.AdminUpdateAPIKeyGroupID(c.Request.Context(), keyID, req.GroupID)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -59,6 +69,9 @@ func (h *AdminAPIKeyHandler) UpdateGroup(c *gin.Context) {
 	}
 	if resetKey != nil && req.GroupID == nil {
 		result.APIKey = resetKey
+	}
+	if statusKey != nil && req.GroupID == nil && resetKey == nil {
+		result.APIKey = statusKey
 	}
 
 	resp := struct {
@@ -73,4 +86,36 @@ func (h *AdminAPIKeyHandler) UpdateGroup(c *gin.Context) {
 		GrantedGroupName:       result.GrantedGroupName,
 	}
 	response.Success(c, resp)
+}
+
+// GetByID returns a single API key, for admin read-back verification.
+// GET /api/v1/admin/api-keys/:id
+func (h *AdminAPIKeyHandler) GetByID(c *gin.Context) {
+	keyID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid API key ID")
+		return
+	}
+	apiKey, err := h.adminService.AdminGetAPIKey(c.Request.Context(), keyID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"api_key": dto.APIKeyFromService(apiKey)})
+}
+
+// Delete tombstone-deletes an API key (soft delete + audit; the credential
+// stops working immediately via auth-cache invalidation).
+// DELETE /api/v1/admin/api-keys/:id
+func (h *AdminAPIKeyHandler) Delete(c *gin.Context) {
+	keyID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid API key ID")
+		return
+	}
+	if err := h.adminService.AdminDeleteAPIKey(c.Request.Context(), keyID); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"deleted": true, "id": keyID})
 }

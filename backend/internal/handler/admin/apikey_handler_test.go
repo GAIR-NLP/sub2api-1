@@ -20,7 +20,9 @@ func setupAPIKeyHandler(adminSvc service.AdminService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	h := NewAdminAPIKeyHandler(adminSvc)
+	router.GET("/api/v1/admin/api-keys/:id", h.GetByID)
 	router.PUT("/api/v1/admin/api-keys/:id", h.UpdateGroup)
+	router.DELETE("/api/v1/admin/api-keys/:id", h.Delete)
 	return router
 }
 
@@ -239,4 +241,100 @@ type failingUpdateGroupService struct {
 
 func (f *failingUpdateGroupService) AdminUpdateAPIKeyGroupID(_ context.Context, _ int64, _ *int64) (*service.AdminUpdateAPIKeyGroupIDResult, error) {
 	return nil, f.err
+}
+
+// --- Admin key manage: status / get / delete ---
+
+func TestAdminAPIKeyHandler_UpdateStatus_Disable(t *testing.T) {
+	svc := newStubAdminService()
+	router := setupAPIKeyHandler(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/api-keys/10", bytes.NewBufferString(`{"status":"disabled"}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, service.StatusDisabled, svc.apiKeys[0].Status)
+
+	var resp struct {
+		Data struct {
+			APIKey struct {
+				Status string `json:"status"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, service.StatusDisabled, resp.Data.APIKey.Status)
+}
+
+func TestAdminAPIKeyHandler_UpdateStatus_Invalid(t *testing.T) {
+	router := setupAPIKeyHandler(newStubAdminService())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/api-keys/10", bytes.NewBufferString(`{"status":"bogus"}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "INVALID_STATUS")
+}
+
+func TestAdminAPIKeyHandler_GetByID(t *testing.T) {
+	router := setupAPIKeyHandler(newStubAdminService())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/api-keys/10", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data struct {
+			APIKey struct {
+				ID     int64  `json:"id"`
+				Status string `json:"status"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, int64(10), resp.Data.APIKey.ID)
+	require.Equal(t, service.StatusActive, resp.Data.APIKey.Status)
+}
+
+func TestAdminAPIKeyHandler_GetByID_NotFound(t *testing.T) {
+	router := setupAPIKeyHandler(newStubAdminService())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/api-keys/999", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestAdminAPIKeyHandler_Delete(t *testing.T) {
+	svc := newStubAdminService()
+	router := setupAPIKeyHandler(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/api-keys/10", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, svc.apiKeys)
+
+	// second delete -> 404 (tombstoned key is gone from listings)
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/api-keys/10", nil)
+	router.ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusNotFound, rec2.Code)
+}
+
+func TestAdminAPIKeyHandler_Delete_InvalidID(t *testing.T) {
+	router := setupAPIKeyHandler(newStubAdminService())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/api-keys/abc", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
