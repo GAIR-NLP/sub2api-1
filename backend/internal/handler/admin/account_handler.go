@@ -2667,6 +2667,67 @@ func (h *AccountHandler) ClearTempUnschedulable(c *gin.Context) {
 	response.Success(c, gin.H{"message": "Temp unschedulable cleared successfully"})
 }
 
+// SetTempUnschedulableRequest represents the request body for setting a
+// temporary unschedulable pause from the admin API.
+type SetTempUnschedulableRequest struct {
+	// Exactly one of duration_minutes / until_unix must be given.
+	DurationMinutes int    `json:"duration_minutes"`
+	UntilUnix       int64  `json:"until_unix"`
+	Reason          string `json:"reason"`
+}
+
+// SetTempUnschedulable handles setting temporary unschedulable status, the
+// write counterpart of the internal auto-pause rules — for external
+// orchestrators imposing fixed-duration pauses.
+// POST /api/v1/admin/accounts/:id/temp-unschedulable
+func (h *AccountHandler) SetTempUnschedulable(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+
+	var req SetTempUnschedulableRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request body")
+		return
+	}
+
+	var until time.Time
+	switch {
+	case req.UntilUnix > 0 && req.DurationMinutes > 0:
+		response.BadRequest(c, "Give only one of duration_minutes / until_unix")
+		return
+	case req.UntilUnix > 0:
+		until = time.Unix(req.UntilUnix, 0)
+	case req.DurationMinutes > 0:
+		const maxDurationMinutes = 30 * 24 * 60 // 30 days
+		if req.DurationMinutes > maxDurationMinutes {
+			response.BadRequest(c, "duration_minutes must be <= 43200 (30 days)")
+			return
+		}
+		until = time.Now().Add(time.Duration(req.DurationMinutes) * time.Minute)
+	default:
+		response.BadRequest(c, "duration_minutes or until_unix is required")
+		return
+	}
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "admin-set"
+	}
+
+	if err := h.rateLimitService.SetTempUnschedulable(c.Request.Context(), accountID, until, reason); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{
+		"message": "Temp unschedulable set successfully",
+		"until":   until.Unix(),
+	})
+}
+
 // GetTodayStats handles getting account today statistics
 // GET /api/v1/admin/accounts/:id/today-stats
 func (h *AccountHandler) GetTodayStats(c *gin.Context) {

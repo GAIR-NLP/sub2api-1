@@ -2272,6 +2272,41 @@ func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID
 	return nil
 }
 
+// SetTempUnschedulable marks an account as temporarily unschedulable until the
+// given time. This is the admin-facing write counterpart of the internally
+// triggered temp-unschedulable rules: external orchestrators (e.g. a policy
+// engine) use it to impose fixed-duration pauses that survive restarts and
+// stay visible in the admin UI.
+func (s *RateLimitService) SetTempUnschedulable(ctx context.Context, accountID int64, until time.Time, reason string) error {
+	if !until.After(time.Now()) {
+		return fmt.Errorf("until must be in the future")
+	}
+	state := &TempUnschedState{
+		UntilUnix:       until.Unix(),
+		TriggeredAtUnix: time.Now().Unix(),
+		ErrorMessage:    strings.TrimSpace(reason),
+		Scope:           TempUnschedScopeAccount,
+	}
+	stored := state.ErrorMessage
+	if raw, err := json.Marshal(state); err == nil {
+		stored = string(raw)
+	}
+	if err := s.accountRepo.SetTempUnschedulable(ctx, accountID, until, stored); err != nil {
+		return err
+	}
+	if s.tempUnschedCache != nil {
+		if err := s.tempUnschedCache.SetTempUnsched(ctx, accountID, state); err != nil {
+			slog.Warn("temp_unsched_cache_set_failed", "account_id", accountID, "error", err)
+		}
+	}
+	if account, err := s.accountRepo.GetByID(ctx, accountID); err == nil {
+		s.notifyAccountSchedulingBlocked(account, until, "temp_unschedulable")
+	} else {
+		slog.Warn("temp_unsched_notify_fetch_failed", "account_id", accountID, "error", err)
+	}
+	return nil
+}
+
 func hasRecoverableRuntimeState(account *Account) bool {
 	if account == nil {
 		return false
